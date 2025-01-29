@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Interactive Blob Playground</title>
+    <style>
+        * { margin: 0; padding: 0; }
+        canvas { display: block; }
+        .dg { position: fixed; right: 10px; top: 10px; }
+    </style>
+</head>
+<body>
+    <canvas class="webgl"></canvas>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dat.gui@0.7.7/build/dat.gui.min.js"></script>
+
+    <script>
+const canvas = document.querySelector('canvas.webgl');
+const scene = new THREE.Scene();
+const gui = new dat.GUI();
+const blobs = [];
+let currentBlob = null;
+
+// Physics parameters
+const params = {
+    addBlob: () => createBlob(),
+    removeBlob: () => blobs.pop()?.mesh.parent?.remove(),
+    clearAll: () => blobs.splice(0).forEach(b => b.mesh.parent?.remove()),
+    repulsionForce: 0.8,
+    springStiffness: 0.4,
+    mouseRadius: 1.2,
+    blobSize: 0.8,
+    color1: '#FF6B6B',
+    color2: '#4ECDC4'
+};
+
+// Setup
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 100);
+camera.position.z = 8;
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+// Blob class
+class Blob {
+    constructor(position) {
+        this.mesh = this.createMesh(position);
+        this.originalPositions = [];
+        this.velocities = [];
+        this.initPhysics();
+    }
+
+    createMesh(position) {
+        const geometry = new THREE.SphereGeometry(params.blobSize, 64, 64);
+        const material = new THREE.ShaderMaterial({
+            vertexShader: `
+                uniform float time;
+                varying vec3 vNormal;
+                varying vec3 vPosition;
+
+                void main() {
+                    vNormal = normal;
+                    vPosition = position;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 color1;
+                uniform vec3 color2;
+                varying vec3 vNormal;
+                varying vec3 vPosition;
+
+                void main() {
+                    vec3 color = mix(color1, color2, smoothstep(-1.0, 1.0, vPosition.y));
+                    float lighting = dot(vNormal, normalize(vec3(0.8, 0.6, 1.0))) * 0.6 + 0.4;
+                    gl_FragColor = vec4(color * lighting, 0.9);
+                }
+            `,
+            uniforms: {
+                time: { value: 0 },
+                color1: { value: new THREE.Color(params.color1) },
+                color2: { value: new THREE.Color(params.color2) }
+            },
+            transparent: true
+        });
+        
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.copy(position || new THREE.Vector3());
+        return mesh;
+    }
+
+    initPhysics() {
+        const positions = this.mesh.geometry.attributes.position.array;
+        this.originalPositions = new Float32Array(positions);
+        this.velocities = new Float32Array(positions.length);
+    }
+
+    update(deltaTime, mouse) {
+        const positions = this.mesh.geometry.attributes.position.array;
+        const meshPosition = this.mesh.position;
+        
+        for(let i = 0; i < positions.length; i += 3) {
+            const dx = positions[i] - this.originalPositions[i];
+            const dy = positions[i+1] - this.originalPositions[i+1];
+            const dz = positions[i+2] - this.originalPositions[i+2];
+            
+            // Spring force
+            this.velocities[i]   += (-dx * params.springStiffness) * deltaTime;
+            this.velocities[i+1] += (-dy * params.springStiffness) * deltaTime;
+            this.velocities[i+2] += (-dz * params.springStiffness) * deltaTime;
+
+            // Mouse interaction
+            if(mouse) {
+                const worldPos = new THREE.Vector3(
+                    positions[i] + meshPosition.x,
+                    positions[i+1] + meshPosition.y,
+                    positions[i+2] + meshPosition.z
+                );
+                const toMouse = mouse.clone().sub(worldPos);
+                const distance = toMouse.length();
+                
+                if(distance < params.mouseRadius) {
+                    const force = toMouse.normalize().multiplyScalar(params.repulsionForce * deltaTime);
+                    this.velocities[i]   += force.x;
+                    this.velocities[i+1] += force.y;
+                    this.velocities[i+2] += force.z;
+                }
+            }
+
+            // Apply velocity
+            positions[i]   += this.velocities[i];
+            positions[i+1] += this.velocities[i+1];
+            positions[i+2] += this.velocities[i+2];
+        }
+        
+        this.mesh.geometry.attributes.position.needsUpdate = true;
+    }
+}
+
+// Create initial blob
+function createBlob(position) {
+    const blob = new Blob(position);
+    scene.add(blob.mesh);
+    blobs.push(blob);
+    return blob;
+}
+
+// GUI
+gui.add(params, 'addBlob').name('Add Blob');
+gui.add(params, 'removeBlob').name('Remove Blob');
+gui.add(params, 'clearAll').name('Clear All');
+gui.add(params, 'repulsionForce', 0, 2).name('Mouse Force');
+gui.add(params, 'springStiffness', 0, 1).name('Stiffness');
+gui.add(params, 'mouseRadius', 0.5, 3).name('Mouse Radius');
+gui.addColor(params, 'color1').name('Color 1').onChange(() => {
+    blobs.forEach(b => b.mesh.material.uniforms.color1.value.set(params.color1));
+});
+gui.addColor(params, 'color2').name('Color 2').onChange(() => {
+    blobs.forEach(b => b.mesh.material.uniforms.color2.value.set(params.color2));
+});
+
+// Mouse interaction
+const mouse = new THREE.Vector3();
+const raycaster = new THREE.Raycaster();
+
+canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects(blobs.map(b => b.mesh));
+    
+    if(intersects.length > 0) {
+        currentBlob = intersects[0].object;
+    } else {
+        const worldMouse = new THREE.Vector3(mouse.x, mouse.y, 0.5)
+            .unproject(camera)
+            .sub(camera.position)
+            .normalize();
+        const distance = -camera.position.z / worldMouse.z;
+        const position = camera.position.clone().add(worldMouse.multiplyScalar(distance));
+        createBlob(position);
+    }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+});
+
+// Animation loop
+let clock = new THREE.Clock();
+function animate() {
+    const deltaTime = clock.getDelta();
+    const worldMouse = new THREE.Vector3(mouse.x, mouse.y, 0.5)
+        .unproject(camera)
+        .sub(camera.position)
+        .normalize();
+    const mousePosition = camera.position.clone().add(worldMouse.multiplyScalar(8));
+
+    blobs.forEach(blob => blob.update(deltaTime, currentBlob === blob.mesh ? null : mousePosition));
+    
+    if(currentBlob) {
+        currentBlob.position.lerp(mousePosition, 0.1);
+    }
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+}
+
+// Initial blobs
+createBlob(new THREE.Vector3(-2, 0, 0));
+createBlob(new THREE.Vector3(2, 0, 0));
+animate();
+
+// Resize handler
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+    </script>
+</body>
+</html>
